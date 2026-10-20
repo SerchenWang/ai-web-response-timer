@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         AI Web Response Timer (four platforms)
 // @namespace    local.research.timer
-// @version      1.3.0
-// @description  跨设备便携版：内置四站计时规则，支持拖动和四角定位。本地运行，不上传数据。
+// @version      1.4.0
+// @description  四站总响应计时，显示两位小数；完成提示音可开关试听，支持拖动、四角定位和内置识别。本地运行，不上传数据。
 // @match        https://chatgpt.com/*
 // @match        https://gemini.google.com/*
 // @match        https://chat.deepseek.com/*
@@ -51,9 +51,9 @@
   }
   const handle = add('div', platform + ' · 拖动此处移动', 'cursor:move;touch-action:none;font-weight:600;padding:3px 0 7px;user-select:none');
   const state = add('div', '就绪');
-  const clock = add('div', '0.0 s', 'font:600 28px/1.5 ui-monospace,Consolas,monospace');
+  const clock = add('div', '0.00 s', 'font:600 28px/1.5 ui-monospace,Consolas,monospace');
   const note = add('div', '发送后自动开始', 'color:#c3cbd5;font-size:11px;max-width:260px');
-  const row = add('div', '', 'display:flex;gap:6px;margin-top:9px');
+  const row = add('div', '', 'display:flex;flex-wrap:wrap;gap:6px;margin-top:9px;max-width:270px');
   function button(label, action) {
     const el = add('button', label, 'background:#364b64;border:1px solid #8090a8;border-radius:6px;color:white;padding:4px 9px;cursor:pointer;font:inherit', row);
     el.type = 'button';
@@ -118,6 +118,102 @@
   handle.addEventListener('pointercancel', stopDragging);
   window.addEventListener('resize', applyPosition);
 
+  const soundRow = add('div', '', 'display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:8px;max-width:270px');
+  const soundLabel = add('label', '', 'display:flex;align-items:center;gap:4px;cursor:pointer', soundRow);
+  const soundToggle = add('input', '', '', soundLabel);
+  soundToggle.type = 'checkbox';
+  soundToggle.checked = settings.soundEnabled !== false;
+  add('span', '完成提示音', '', soundLabel);
+  const soundStatus = add('span', soundToggle.checked ? '待启用' : '已关闭', 'font-size:11px;color:#c3cbd5', soundRow);
+  const soundTest = add('button', '试听', 'background:#364b64;border:1px solid #8090a8;border-radius:6px;color:white;padding:3px 8px;cursor:pointer;font:inherit', soundRow);
+  soundTest.type = 'button';
+  soundTest.title = '先点击试听，确认浏览器允许播放提示音';
+  let audioContext = null;
+  let soundPreparing = null;
+  function updateSoundStatus() {
+    soundStatus.textContent = !soundToggle.checked ? '已关闭'
+      : audioContext && audioContext.state === 'running' ? '已就绪' : '请点击试听';
+  }
+  function prepareSound() {
+    // Creation/resume is requested only from a trusted user interaction.
+    if (!soundToggle.checked) return Promise.resolve(false);
+    if (soundPreparing) return soundPreparing;
+    try {
+      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+      if (!AudioContextClass) {
+        soundStatus.textContent = '浏览器不支持';
+        return Promise.resolve(false);
+      }
+      if (!audioContext || audioContext.state === 'closed') {
+        audioContext = new AudioContextClass();
+        audioContext.addEventListener('statechange', updateSoundStatus);
+      }
+      const attempt = audioContext.state === 'running' ? Promise.resolve() : audioContext.resume();
+      soundPreparing = Promise.resolve(attempt).then(() => {
+        updateSoundStatus();
+        return soundToggle.checked && audioContext.state === 'running';
+      }).catch(() => {
+        soundStatus.textContent = soundToggle.checked ? '被阻止，请试听' : '已关闭';
+        return false;
+      }).finally(() => { soundPreparing = null; });
+      return soundPreparing;
+    } catch {
+      soundStatus.textContent = '音频不可用';
+      return Promise.resolve(false);
+    }
+  }
+  function playCompletionSound() {
+    if (!soundToggle.checked) return;
+    if (!audioContext || audioContext.state !== 'running') {
+      updateSoundStatus();
+      return;
+    }
+    try {
+      // Two short, low-volume tones generated locally; no audio downloads or microphone access.
+      const base = audioContext.currentTime + 0.015;
+      [660, 880].forEach((frequency, index) => {
+        const oscillator = audioContext.createOscillator();
+        const gain = audioContext.createGain();
+        const at = base + index * 0.18;
+        oscillator.type = 'sine';
+        oscillator.frequency.setValueAtTime(frequency, at);
+        gain.gain.setValueAtTime(0, at);
+        gain.gain.linearRampToValueAtTime(0.08, at + 0.012);
+        gain.gain.exponentialRampToValueAtTime(0.001, at + 0.13);
+        oscillator.connect(gain);
+        gain.connect(audioContext.destination);
+        oscillator.onended = () => { oscillator.disconnect(); gain.disconnect(); };
+        oscillator.start(at);
+        oscillator.stop(at + 0.15);
+      });
+      updateSoundStatus();
+    } catch {
+      soundStatus.textContent = '播放失败，请试听';
+    }
+  }
+  soundToggle.addEventListener('change', event => {
+    settings.soundEnabled = soundToggle.checked;
+    saveSettings();
+    updateSoundStatus();
+    if (event.isTrusted && soundToggle.checked) void prepareSound();
+  });
+  soundTest.addEventListener('click', event => {
+    if (!event.isTrusted) return;
+    if (!soundToggle.checked) {
+      soundStatus.textContent = '请先勾选提示音';
+      return;
+    }
+    void prepareSound().then(ready => { if (ready) playCompletionSound(); });
+  });
+  function unlockSound(event) {
+    if (event.isTrusted && soundToggle.checked && (!audioContext || audioContext.state !== 'running')) {
+      void prepareSound();
+    }
+  }
+  window.addEventListener('pointerdown', unlockSound, true);
+  window.addEventListener('keydown', unlockSound, true);
+  window.addEventListener('click', unlockSound, true);
+
   const now = () => performance.now();
   let running = false;
   let started = 0;
@@ -181,7 +277,7 @@
   }
   function draw() {
     if (!running) return;
-    clock.textContent = ((now() - started) / 1000).toFixed(1) + ' s';
+    clock.textContent = ((now() - started) / 1000).toFixed(2) + ' s';
     frame = requestAnimationFrame(draw);
   }
   function begin(via, at = now()) {
@@ -197,14 +293,15 @@
     cancelAnimationFrame(frame);
     draw();
   }
-  function finish(auto, at = now()) {
+  function finish(auto, at = now(), notify = true) {
     if (!running) return;
     running = false;
     cancelAnimationFrame(frame);
-    clock.textContent = (Math.max(0, at - started) / 1000).toFixed(1) + ' s';
+    clock.textContent = (Math.max(0, at - started) / 1000).toFixed(2) + ' s';
     state.textContent = auto ? '自动结束' : '手动结束';
     note.textContent = (auto ? '生成控件已消失；取消或出错也可能触发结束' : '以手动点击为结束时间')
       + (backgrounded ? '；曾切入后台，误差可能增大' : '');
+    if (notify) playCompletionSound();
   }
   function reset() {
     running = false;
@@ -214,7 +311,7 @@
     missingSince = null;
     // Resetting during generation should not immediately start another timer.
     lastBusy = busy();
-    clock.textContent = '0.0 s';
+    clock.textContent = '0.00 s';
     state.textContent = '就绪';
     note.textContent = '发送后自动开始';
   }
@@ -304,7 +401,7 @@
       // A new idle conversation is navigation, not a completed response.
       // Keep an active timer when a first send changes the conversation URL.
       if (running && sawBusy && !active) {
-        finish(false, t);
+        finish(false, t, false);
         state.textContent = '页面已切换';
         note.textContent = '本轮计时中断，请重新发送后计时';
       }
